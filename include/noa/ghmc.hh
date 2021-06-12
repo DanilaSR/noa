@@ -37,13 +37,13 @@
 
 namespace noa::ghmc {
 
-    using Parameters = utils::Tensors;
-    using Momentum = utils::Tensors;
+    using Parameters = utils::Tensor;
+    using Momentum = utils::Tensor;
     using MomentumOpt = std::optional<Momentum>;
     using LogProbability = utils::Tensor;
     using LogProbabilityGraph = utils::ADGraph;
-    using Spectrum = utils::Tensors;
-    using Rotation = utils::Tensors;
+    using Spectrum = utils::Tensor;
+    using Rotation = utils::Tensor;
     using MetricDecomposition = std::tuple<Spectrum, Rotation>;
     using MetricDecompositionOpt = std::optional<MetricDecomposition>;
     using Energy = utils::Tensor;
@@ -55,8 +55,8 @@ namespace noa::ghmc {
     using EnergyLevel = std::vector<Energy>;
 
     using HamiltonianFlow = std::tuple<ParametersFlow, MomentumFlow, EnergyLevel>;
-    using ParametersGradient = utils::Tensors;
-    using MomentumGradient = utils::Tensors;
+    using ParametersGradient = utils::Tensor;
+    using MomentumGradient = utils::Tensor;
     using HamiltonianGradient = std::tuple<ParametersGradient, MomentumGradient>;
     using HamiltonianGradientOpt = std::optional<HamiltonianGradient>;
     using Samples = std::vector<Parameters>;
@@ -115,43 +115,34 @@ namespace noa::ghmc {
             if (!hess_.has_value()) {
                 if (conf.verbose)
                     std::cerr << "GHMC: failed to compute hessian for log probability\n"
-                              << std::get<LogProbability>(log_prob_graph) << "\n";
+                              << std::get<0>(log_prob_graph) << "\n";
                 return MetricDecompositionOpt{};
             }
 
-            const auto nparam = hess_.value().size();
-            auto spectrum = Spectrum{};
-            spectrum.reserve(nparam);
-            auto rotation = Rotation{};
-            rotation.reserve(nparam);
+            const auto &hess = hess_.value();
+            const auto n = hess.size(0);
+            const auto[eigs, rotation] = torch::symeig(
+                    -hess + conf.jitter * torch::eye(n, hess.options()) * torch::rand(n, hess.options()),
+                    true);
 
-            for (const auto &hess : hess_.value()) {
-                const auto n = hess.size(0);
-                const auto[eigs, Q] = torch::symeig(
-                        -hess + conf.jitter * torch::eye(n, hess.options()) * torch::rand(n, hess.options()),
-                        true);
-
-                const utils::Tensor check_Q = Q.detach().sum();
-                if (torch::isnan(check_Q).item<bool>() || torch::isinf(check_Q).item<bool>()) {
-                    std::cerr << "GHMC: failed to compute local rotation matrix for log probability\n"
-                              << std::get<LogProbability>(log_prob_graph) << "\n";
-                    return MetricDecompositionOpt{};
-                }
-
-                const auto reg_eigs = torch::where(eigs.abs() >= conf.cutoff, eigs,
-                                                   torch::tensor(conf.cutoff, hess.options()));
-                const auto softabs = torch::abs((1 / torch::tanh(conf.softabs_const * reg_eigs)) * reg_eigs);
-
-                const utils::Tensor check_softabs = softabs.detach().sum();
-                if (torch::isnan(check_softabs).item<bool>() || torch::isinf(check_softabs).item<bool>()) {
-                    std::cerr << "GHMC: failed to compute SoftAbs map for log probability\n"
-                              << std::get<LogProbability>(log_prob_graph) << "\n";
-                    return MetricDecompositionOpt{};
-                }
-
-                spectrum.push_back(softabs);
-                rotation.push_back(Q);
+            const Rotation check_rotation = rotation.detach().sum();
+            if (torch::isnan(check_rotation).item<bool>() || torch::isinf(check_rotation).item<bool>()) {
+                std::cerr << "GHMC: failed to compute local rotation matrix for log probability\n"
+                          << std::get<0>(log_prob_graph) << "\n";
+                return MetricDecompositionOpt{};
             }
+
+            const auto reg_eigs = torch::where(eigs.abs() >= conf.cutoff, eigs,
+                                               torch::tensor(conf.cutoff, hess.options()));
+            const auto spectrum = torch::abs((1 / torch::tanh(conf.softabs_const * reg_eigs)) * reg_eigs);
+
+            const Spectrum check_spectrum = spectrum.detach().sum();
+            if (torch::isnan(check_spectrum).item<bool>() || torch::isinf(check_spectrum).item<bool>()) {
+                std::cerr << "GHMC: failed to compute SoftAbs map for log probability\n"
+                          << std::get<0>(log_prob_graph) << "\n";
+                return MetricDecompositionOpt{};
+            }
+
             return MetricDecompositionOpt{MetricDecomposition{spectrum, rotation}};
         };
     }
@@ -163,7 +154,8 @@ namespace noa::ghmc {
                 const Parameters &parameters,
                 const MomentumOpt &momentum_ = std::nullopt) {
             const auto log_prob_graph = log_prob_density(parameters);
-            const LogProbability check_log_prob = std::get<LogProbability>(log_prob_graph).detach();
+            const auto &log_prob = std::get<0>(log_prob_graph);
+            const LogProbability check_log_prob = log_prob.detach();
             if (torch::isnan(check_log_prob).item<bool>() || torch::isinf(check_log_prob).item<bool>()) {
                 if (conf.verbose)
                     std::cerr << "GHMC: failed to compute log probability.\n";
@@ -174,49 +166,37 @@ namespace noa::ghmc {
             if (!metric.has_value()) {
                 if (conf.verbose)
                     std::cerr << "GHMC: failed to compute local metric for log probability\n"
-                              << std::get<LogProbability>(log_prob_graph) << "\n";
+                              << std::get<0>(log_prob_graph) << "\n";
                 return PhaseSpaceFoliationOpt{};
             }
             const auto&[spectrum, rotation] = metric.value();
 
-            auto energy = -std::get<LogProbability>(log_prob_graph);
+            auto energy = -log_prob;
 
-            const auto nparam = parameters.size();
-            auto momentum = Momentum{};
-            momentum.reserve(nparam);
+            const auto momentum_lift = momentum_.has_value()
+                                       ? momentum_.value()
+                                       : rotation.detach().mv(
+                            torch::sqrt(spectrum.detach()) * torch::randn_like(spectrum));
 
-            for (uint32_t i = 0; i < nparam; i++) {
+            const auto momentum = momentum_lift.detach().view_as(parameters).requires_grad_(true);
 
-                const auto &rotation_i = rotation.at(i);
-                const auto &spectrum_i = spectrum.at(i);
+            const auto first_order_term = spectrum.log().sum() / 2;
+            const auto mass = rotation.mm(torch::diag(1 / spectrum)).mm(rotation.t());
 
-                const auto momentum_lift = momentum_.has_value()
-                                           ? momentum_.value().at(i)
-                                           : rotation_i.detach().mv(
-                                torch::sqrt(spectrum_i.detach()) * torch::randn_like(spectrum_i));
+            const auto momentum_vec = momentum.flatten();
+            const auto second_order_term = momentum_vec.dot(mass.mv(momentum_vec)) / 2;
 
-                const auto momentum_i = momentum_lift.detach().view_as(parameters.at(i)).requires_grad_(true);
-
-                const auto first_order_term = spectrum_i.log().sum() / 2;
-                const auto mass = rotation_i.mm(torch::diag(1 / spectrum_i)).mm(rotation_i.t());
-
-                const auto momentum_vec = momentum_i.flatten();
-                const auto second_order_term = momentum_vec.dot(mass.mv(momentum_vec)) / 2;
-
-                energy += first_order_term + second_order_term;
-                momentum.push_back(momentum_i);
-            }
-
+            energy += first_order_term + second_order_term;
             const Energy check_energy = energy.detach();
             if (torch::isnan(check_energy).item<bool>() || torch::isinf(check_energy).item<bool>()) {
                 if (conf.verbose)
                     std::cerr << "GHMC: failed to compute Hamiltonian for log probability\n"
-                              << std::get<LogProbability>(log_prob_graph) << "\n";
+                              << std::get<0>(log_prob_graph) << "\n";
                 return PhaseSpaceFoliationOpt{};
             }
 
             return PhaseSpaceFoliationOpt{
-                    PhaseSpaceFoliation{std::get<Parameters>(log_prob_graph), momentum, energy}};
+                    PhaseSpaceFoliation{std::get<1>(log_prob_graph), momentum, energy}};
         };
     }
 
@@ -230,41 +210,25 @@ namespace noa::ghmc {
             }
             const auto &[params, momentum, energy] = foliation.value();
 
-            const auto nparam = params.size();
-            auto variables = utils::Tensors{};
-            variables.reserve(2 * nparam);
+            const auto ham_grad = torch::autograd::grad({energy}, {params, momentum});
 
-            variables.insert(variables.end(), params.begin(), params.end());
-            variables.insert(variables.end(), momentum.begin(), momentum.end());
-
-            const auto ham_grad = torch::autograd::grad({energy}, variables);
-
-            auto params_grad = ParametersGradient{};
-            params_grad.reserve(nparam);
-
-            for (uint32_t i = 0; i < nparam; i++) {
-                const auto params_grad_i = ham_grad.at(i).detach();
-                const auto check_params = params_grad_i.sum();
-                if (torch::isnan(check_params).item<bool>() || torch::isinf(check_params).item<bool>()) {
-                    if (conf.verbose)
-                        std::cerr << "GHMC: failed to compute parameters gradient for Hamiltonian\n"
-                                  << energy << "\n";
-                    return HamiltonianGradientOpt{};
-                } else params_grad.push_back(params_grad_i);
+            auto params_grad = ham_grad[0];
+            const auto check_params = params_grad.sum();
+            if (torch::isnan(check_params).item<bool>() || torch::isinf(check_params).item<bool>()) {
+                if (conf.verbose)
+                    std::cerr << "GHMC: failed to compute parameters gradient for Hamiltonian\n"
+                              << energy << "\n";
+                return HamiltonianGradientOpt{};
             }
 
-            auto momentum_grad = MomentumGradient{};
-            momentum_grad.reserve(nparam);
+            auto momentum_grad = ham_grad[1];
+            const auto check_momentum = momentum_grad.sum();
+            if (torch::isnan(check_momentum).item<bool>() || torch::isinf(check_momentum).item<bool>()) {
+                if (conf.verbose)
+                    std::cerr << "GHMC: failed to compute momentum gradient for Hamiltonian\n"
+                              << energy << "\n";
+                return HamiltonianGradientOpt{};
 
-            for (uint32_t i = nparam; i < 2 * nparam; i++) {
-                const auto momentum_grad_i = ham_grad.at(i).detach();
-                const auto check_momentum = momentum_grad_i.sum();
-                if (torch::isnan(check_momentum).item<bool>() || torch::isinf(check_momentum).item<bool>()) {
-                    if (conf.verbose)
-                        std::cerr << "GHMC: failed to compute momentum gradient for Hamiltonian\n"
-                                  << energy << "\n";
-                    return HamiltonianGradientOpt{};
-                } else momentum_grad.push_back(momentum_grad_i);
             }
 
             return HamiltonianGradientOpt{HamiltonianGradient{params_grad, momentum_grad}};
@@ -298,16 +262,9 @@ namespace noa::ghmc {
 
             const auto &[initial_params, initial_momentum, initial_energy] = foliation.value();
 
-            const auto nparam = parameters.size();
-            auto params = Parameters{};
-            params.reserve(nparam);
-            auto momentum_copy = Momentum{};
-            momentum_copy.reserve(nparam);
 
-            for (uint32_t i = 0; i < nparam; i++) {
-                params.push_back(initial_params.at(i).detach());
-                momentum_copy.push_back(initial_momentum.at(i).detach());
-            }
+            auto params = initial_params.detach();
+            auto momentum_copy = initial_momentum.detach();
 
             params_flow.push_back(params);
             momentum_flow.push_back(momentum_copy);
@@ -332,13 +289,8 @@ namespace noa::ghmc {
             const auto delta = conf.step_size / 2;
             const auto &[c, s] = rot;
 
-            auto params_copy = params;
-            auto momentum = momentum_copy;
-
-            for (uint32_t i = 0; i < nparam; i++) {
-                params_copy.at(i) = params_copy.at(i) + std::get<1>(dynamics.value()).at(i) * delta;
-                momentum.at(i) = momentum.at(i) - std::get<0>(dynamics.value()).at(i) * delta;
-            }
+            auto params_copy = params + std::get<1>(dynamics.value()) * delta;
+            auto momentum = momentum_copy - std::get<0>(dynamics.value()) * delta;
 
             for (iter_step = 0; iter_step < conf.max_flow_steps; iter_step++) {
 
@@ -349,25 +301,22 @@ namespace noa::ghmc {
                     break;
                 }
 
-                for (uint32_t i = 0; i < nparam; i++) {
+                params = params + std::get<1>(dynamics.value()) * delta;
+                momentum_copy = momentum_copy - std::get<0>(dynamics.value()) * delta;
 
-                    params.at(i) = params.at(i) + std::get<1>(dynamics.value()).at(i) * delta;
-                    momentum_copy.at(i) = momentum_copy.at(i) - std::get<0>(dynamics.value()).at(i) * delta;
+                params = (params + params_copy +
+                          c * (params - params_copy) +
+                          s * (momentum - momentum_copy)) / 2;
+                momentum = (momentum + momentum_copy -
+                            s * (params - params_copy) +
+                            c * (momentum - momentum_copy)) / 2;
+                params_copy = (params + params_copy -
+                               c * (params - params_copy) -
+                               s * (momentum - momentum_copy)) / 2;
+                momentum_copy = (momentum + momentum_copy +
+                                 s * (params - params_copy) -
+                                 c * (momentum - momentum_copy)) / 2;
 
-                    params.at(i) = (params.at(i) + params_copy.at(i) +
-                                    c * (params.at(i) - params_copy.at(i)) +
-                                    s * (momentum.at(i) - momentum_copy.at(i))) / 2;
-                    momentum.at(i) = (momentum.at(i) + momentum_copy.at(i) -
-                                      s * (params.at(i) - params_copy.at(i)) +
-                                      c * (momentum.at(i) - momentum_copy.at(i))) / 2;
-                    params_copy.at(i) = (params.at(i) + params_copy.at(i) -
-                                         c * (params.at(i) - params_copy.at(i)) -
-                                         s * (momentum.at(i) - momentum_copy.at(i))) / 2;
-                    momentum_copy.at(i) = (momentum.at(i) + momentum_copy.at(i) +
-                                           s * (params.at(i) - params_copy.at(i)) -
-                                           c * (momentum.at(i) - momentum_copy.at(i))) / 2;
-
-                }
 
                 foliation = ham(params_copy, momentum);
                 dynamics = ham_grad(foliation);
@@ -376,10 +325,8 @@ namespace noa::ghmc {
                     break;
                 }
 
-                for (uint32_t i = 0; i < nparam; i++) {
-                    params.at(i) = params.at(i) + std::get<1>(dynamics.value()).at(i) * delta;
-                    momentum_copy.at(i) = momentum_copy.at(i) - std::get<0>(dynamics.value()).at(i) * delta;
-                }
+                params = params + std::get<1>(dynamics.value()) * delta;
+                momentum_copy = momentum_copy - std::get<0>(dynamics.value()) * delta;
 
                 foliation = ham(params, momentum_copy);
                 dynamics = ham_grad(foliation);
@@ -388,10 +335,8 @@ namespace noa::ghmc {
                     break;
                 }
 
-                for (uint32_t i = 0; i < nparam; i++) {
-                    params_copy.at(i) = params_copy.at(i) + std::get<1>(dynamics.value()).at(i) * delta;
-                    momentum.at(i) = momentum.at(i) - std::get<0>(dynamics.value()).at(i) * delta;
-                }
+                params_copy = params_copy + std::get<1>(dynamics.value()) * delta;
+                momentum = momentum - std::get<0>(dynamics.value()) * delta;
 
                 foliation = ham(params, momentum);
                 if (!foliation.has_value()) {
@@ -401,16 +346,14 @@ namespace noa::ghmc {
 
                 params_flow.push_back(params);
                 momentum_flow.push_back(momentum);
-                energy_level.push_back(std::get<Energy>(foliation.value()).detach());
+                energy_level.push_back(std::get<2>(foliation.value()).detach());
 
                 if (iter_step < conf.max_flow_steps - 1) {
                     const auto rho = -torch::relu(energy_level.back() - energy_level.front());
-                    if ((rho >= torch::log(torch::rand_like(rho))).item<bool>())
-                        for (uint32_t i = 0; i < nparam; i++) {
-                            params_copy.at(i) = params_copy.at(i) + std::get<1>(dynamics.value()).at(i) * delta;
-                            momentum.at(i) = momentum.at(i) - std::get<0>(dynamics.value()).at(i) * delta;
-                        }
-                    else {
+                    if ((rho >= torch::log(torch::rand_like(rho))).item<bool>()) {
+                        params_copy = params_copy + std::get<1>(dynamics.value()) * delta;
+                        momentum = momentum - std::get<0>(dynamics.value()) * delta;
+                    } else {
                         if (conf.verbose)
                             std::cout << "GHMC: rejecting sample at iteration "
                                       << iter_step + 1 << "/" << conf.max_flow_steps << "\n";
@@ -437,13 +380,8 @@ namespace noa::ghmc {
                           << "GHMC: generating MCMC chain of maximum length "
                           << max_num_samples << " ...\n";
 
-            const auto nparam = initial_parameters.size();
-            auto params = Parameters{};
-            params.reserve(nparam);
-            for (const auto &param : initial_parameters)
-                params.push_back(param.detach());
 
-            samples.push_back(params);
+            samples.push_back(initial_parameters.detach());
             uint32_t iter = 0;
 
             while (iter < num_iterations) {

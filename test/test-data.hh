@@ -20,11 +20,11 @@ inline torch::Tensor lazy_load_or_fail(TensorOpt &tensor, const Path &path) {
 }
 
 inline const auto log_funnel = [](const Parameters &theta_) {
-    const auto theta = theta_.at(0).detach().requires_grad_(true);
+    const auto theta = theta_.detach().requires_grad_(true);
     const auto dim = theta.numel() - 1;
     const auto log_prob = -((torch::exp(theta[0]) * theta.slice(0, 1, dim + 1).pow(2).sum()) +
                             (theta[0].pow(2) / 9) - dim * theta[0]) / 2;
-    return LogProbabilityGraph{log_prob, {theta}};
+    return LogProbabilityGraph{log_prob, theta};
 };
 
 inline const auto conf_funnel = Configuration<float>{}

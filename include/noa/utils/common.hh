@@ -45,12 +45,11 @@ namespace noa::utils {
     using Tensor = torch::Tensor;
     using TensorOpt = std::optional<Tensor>;
     using Tensors = std::vector<Tensor>;
-    using TensorsOpt = std::optional<Tensors>;
     using ScriptModule = torch::jit::Module;
     using ScriptModuleOpt = std::optional<ScriptModule>;
     using OutputLeaf = Tensor;
-    using InputLeaves = Tensors;
-    using ADGraph = std::tuple<OutputLeaf, InputLeaves>;
+    using InputLeaf = Tensor;
+    using ADGraph = std::tuple<OutputLeaf, InputLeaf>;
 
     constexpr double_t TOLERANCE = 1E-6;
     constexpr int32_t SEED = 987654;
@@ -249,19 +248,6 @@ namespace noa::utils {
         } else {
             return std::nullopt;
         }
-    }
-
-    inline Tensor stack(const std::vector<Tensors> &vec_tensors){
-        auto result = Tensors{};
-        result.reserve(vec_tensors.size());
-        for(const auto &tensors: vec_tensors){
-            auto tensors_flat = Tensors{};
-            tensors_flat.reserve(tensors.size());
-            for(const auto &tensor: tensors)
-                tensors_flat.push_back(tensor.flatten());
-            result.push_back(torch::cat(tensors_flat));
-        }
-        return torch::stack(result);
     }
 
 } // namespace noa::utils

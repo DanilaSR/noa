@@ -32,45 +32,36 @@
 
 namespace noa::utils::numerics {
 
-    inline TensorsOpt hessian(const ADGraph &ad_graph) {
-        const auto &value = std::get<OutputLeaf>(ad_graph);
+    inline TensorOpt hessian(const ADGraph &ad_graph) {
+        const auto &value = std::get<0>(ad_graph);
         if ((value.dim() > 0)) {
             std::cerr << "Invalid arguments to noa::utils::numerics::hessian : "
                       << "expecting 0-dim tensor for output leaf in the AD graph\n";
-            return TensorsOpt{};
+            return TensorOpt{};
         }
 
-        const auto &variables = std::get<InputLeaves>(ad_graph);
-        const auto gradients = torch::autograd::grad({value}, variables, {}, torch::nullopt, true);
+        const auto &variable = std::get<1>(ad_graph);
+        const auto gradient = torch::autograd::grad({value}, {variable}, {}, torch::nullopt, true)[0].flatten();
 
-        auto hess = Tensors{};
-        const auto nvar = variables.size();
-        hess.reserve(nvar);
+        const auto n = variable.numel();
+        const auto res = value.new_zeros({n, n});
 
-        for(uint32_t ivar = 0; ivar < nvar; ivar++){
-            const auto variable = variables.at(ivar);
-            const auto n = variable.numel();
-            const auto res = value.new_zeros({n, n});
-            const auto grad = gradients.at(ivar).flatten();
-
-            uint32_t i = 0;
-            for (uint32_t j = 0; j < n; j++) {
-                const auto row = grad[j].requires_grad()
-                                 ? torch::autograd::grad({grad[i]}, {variable}, {}, true, true, true)[0].flatten().slice(0, j, n)
-                                 : grad[j].new_zeros(n - j);
-                res[i].slice(0, i, n).add_(row);
-                i++;
-            }
-
-            const auto check = torch::triu(res.detach()).sum();
-            if(torch::isnan(check).item<bool>() || torch::isinf(check).item<bool>())
-                return TensorsOpt{};
-            else
-                hess.push_back(res + torch::triu(res, 1).t());
+        uint32_t i = 0;
+        for (uint32_t j = 0; j < n; j++) {
+            const auto row = gradient[j].requires_grad()
+                             ? torch::autograd::grad({gradient[i]}, {variable}, {}, true, true, true)[0]
+                                     .flatten().slice(0, j, n)
+                             : gradient[j].new_zeros(n - j);
+            res[i].slice(0, i, n).add_(row);
+            i++;
         }
 
-        return hess;
+        const auto check = torch::triu(res.detach()).sum();
+        return (torch::isnan(check).item<bool>() || torch::isinf(check).item<bool>())
+               ? TensorOpt{}
+               : res + torch::triu(res, 1).t();
     }
+
 
     // https://pomax.github.io/bezierinfo/legendre-gauss.html
     template<typename Dtype, typename Function>
