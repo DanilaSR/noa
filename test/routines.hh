@@ -33,9 +33,9 @@ inline Status sample_normal_distribution(const Path &save_result_to,
     const auto sigma = torch::tensor({.5f, 1.f, 2.f}, torch::device(device));
 
     const auto log_prob_normal = [&mean, &sigma](const Parameters &theta_) {
-        const auto theta = theta_.at(0).detach().requires_grad_(true);
+        const auto theta = theta_.detach().requires_grad_(true);
         const auto log_prob = -((theta - mean) / sigma).pow(2).sum() / 2;
-        return LogProbabilityGraph{log_prob, {theta}};
+        return LogProbabilityGraph{log_prob, theta};
     };
 
     std::cout << "Sampling Normal distribution:\n"
@@ -44,7 +44,7 @@ inline Status sample_normal_distribution(const Path &save_result_to,
               << sigma.view({1, 3}) << "\n";
 
     // Initialise parameters
-    const auto params_init = Parameters{torch::zeros(3, torch::device(device))};
+    const auto params_init = torch::zeros(3, torch::device(device));
 
     // Create sampler
     const auto normal_sampler = sampler(
@@ -65,7 +65,7 @@ inline Status sample_normal_distribution(const Path &save_result_to,
         return false;
     }
 
-    const auto result = stack(samples);
+    const auto result = torch::stack(samples);
     save_result(result, save_result_to);
     const auto[s_sigma, s_mean] = torch::std_mean(result.slice(0, result.size(0) / 10, result.size(0)), 0, true, true);
 
@@ -99,7 +99,7 @@ inline Status sample_funnel_distribution(const Path &save_result_to,
 
     // Run sampler
     const auto begin = steady_clock::now();
-    const auto samples = funnel_sampler(Parameters{params_init}, 100);
+    const auto samples = funnel_sampler(params_init, 100);
     const auto end = steady_clock::now();
     std::cout << "GHMC: sampler took " << duration_cast<microseconds>(end - begin).count() / 1E+6
               << " seconds" << std::endl;
@@ -108,7 +108,7 @@ inline Status sample_funnel_distribution(const Path &save_result_to,
         return false;
     }
 
-    const auto result = stack(samples);
+    const auto result = torch::stack(samples);
     save_result(result, save_result_to);
 
     return true;
@@ -143,6 +143,7 @@ inline Status sample_bayesian_net(const Path &save_result_to,
     const auto inputs_val = std::vector<torch::jit::IValue>{x_val};
     const auto inputs_train = std::vector<torch::jit::IValue>{x_train};
 
+    /*
     const auto log_prob_bnet = [&net, &inputs_train, &y_train](const Parameters &theta) {
         uint32_t i = 0;
         auto log_prob = torch::tensor(0, y_train.options());
@@ -219,6 +220,6 @@ inline Status sample_bayesian_net(const Path &save_result_to,
               << torch::stack({loss_fn(bayes_mean_pred + bayes_std_pred, y_val),
                                loss_fn(bayes_mean_pred - bayes_std_pred, y_val)}).view({1,2})
               << "\n";
-
+    */
     return true;
 }
