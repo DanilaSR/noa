@@ -45,6 +45,7 @@ inline const auto expected_energy_pt = ghmc_dir / "expected_energy.pt";
 inline const auto expected_flow_theta_pt = ghmc_dir / "expected_flow_theta.pt";
 inline const auto expected_flow_moment_pt = ghmc_dir / "expected_flow_moment.pt";
 inline const auto jit_net_pt = ghmc_dir / "jit_net.pt";
+inline const auto jit_dual_net_pt = ghmc_dir / "jit_dual_net.pt";
 
 inline const auto pms_dir = noa_test_data / "pms";
 inline const auto kinetic_energies_pt = pms_dir / "kinetic_energies.pt";

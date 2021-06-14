@@ -115,15 +115,24 @@ inline Status sample_funnel_distribution(const Path &save_result_to,
 }
 
 
-inline Status sample_bayesian_net(const Path &save_result_to,
-                                  torch::DeviceType device = torch::kCPU) {
+inline Status sample_bayesian_net(
+        const Path &test_data_location,
+        const Path &save_result_to,
+        torch::DeviceType device = torch::kCPU) {
     torch::manual_seed(SEED);
 
     std::cout << "Bayesian Deep Learning regression example:\n";
 
-    auto module = load_module(jit_net_pt);
+    auto module = load_module(test_data_location / jit_net_pt);
     if (!module.has_value())
         return false;
+
+    auto dual_module = load_module(test_data_location / jit_dual_net_pt);
+    if (!dual_module.has_value())
+        return false;
+
+    auto &dual_net = dual_module.value();
+
 
     const auto n_tr = 6;
     const auto n_val = 300;
@@ -139,87 +148,93 @@ inline Status sample_bayesian_net(const Path &save_result_to,
     net.train(true);
     net.to(device);
 
-    const auto params_init = parameters(net);
-    const auto inputs_val = std::vector<torch::jit::IValue>{x_val};
-    const auto inputs_train = std::vector<torch::jit::IValue>{x_train};
+    set_flat_buffers(dual_net, x_train.flatten());
+
+    return true;
 
     /*
-    const auto log_prob_bnet = [&net, &inputs_train, &y_train](const Parameters &theta) {
-        uint32_t i = 0;
-        auto log_prob = torch::tensor(0, y_train.options());
-        for (const auto &param: net.parameters()) {
-            param.set_data(theta.at(i).detach());
-            log_prob += param.pow(2).sum();
-            i++;
-        }
-        const auto output = net.forward(inputs_train).toTensor();
-        log_prob = -50 * (y_train - output).pow(2).sum() - log_prob / 2;
-        return LogProbabilityGraph{log_prob, parameters(net)};
-    };
 
-    const auto conf_bnet = Configuration<float>{}
-            .set_max_flow_steps(10)
-            .set_jitter(0.01f)
-            .set_step_size(0.001f)
-            .set_binding_const(10.f)
-            .set_verbosity(true);
+   const auto params_init = parameters(net);
+   const auto inputs_val = std::vector<torch::jit::IValue>{x_val};
+   const auto inputs_train = std::vector<torch::jit::IValue>{x_train};
 
-    const auto bnet_sampler = sampler(log_prob_bnet, conf_bnet);
+   const auto log_prob_bnet = [&net, &inputs_train, &y_train](const Parameters &theta) {
+       uint32_t i = 0;
+       auto log_prob = torch::tensor(0, y_train.options());
+       for (const auto &param: net.parameters()) {
+           param.set_data(theta.at(i).detach());
+           log_prob += param.pow(2).sum();
+           i++;
+       }
+       const auto output = net.forward(inputs_train).toTensor();
+       log_prob = -50 * (y_train - output).pow(2).sum() - log_prob / 2;
+       return LogProbabilityGraph{log_prob, parameters(net)};
+   };
 
-    // Run sampler
-    const auto begin = steady_clock::now();
-    const auto samples = bnet_sampler(params_init, 20);
-    const auto end = steady_clock::now();
-    std::cout << "GHMC: sampler took " << duration_cast<microseconds>(end - begin).count() / 1E+6
-              << " seconds" << std::endl;
-    if (samples.size() <= 1) {
-        std::cerr << "Sampler failed\n";
-        return false;
-    }
+   const auto conf_bnet = Configuration<float>{}
+           .set_max_flow_steps(10)
+           .set_jitter(0.01f)
+           .set_step_size(0.001f)
+           .set_binding_const(10.f)
+           .set_verbosity(true);
 
-    const auto result = stack(samples);
-    save_result(result, save_result_to);
+   const auto bnet_sampler = sampler(log_prob_bnet, conf_bnet);
 
-    const auto stationary_sample = result.slice(0, result.size(0) / 10);
+   // Run sampler
+   const auto begin = steady_clock::now();
+   const auto samples = bnet_sampler(params_init, 20);
+   const auto end = steady_clock::now();
+   std::cout << "GHMC: sampler took " << duration_cast<microseconds>(end - begin).count() / 1E+6
+             << " seconds" << std::endl;
+   if (samples.size() <= 1) {
+       std::cerr << "Sampler failed\n";
+       return false;
+   }
 
-    set_flat_parameters(net, stationary_sample.mean(0));
-    const auto posterior_mean_pred = net.forward(inputs_val).toTensor().detach();
+   const auto result = stack(samples);
+   save_result(result, save_result_to);
 
-    auto bayes_preds_ = Tensors{};
-    bayes_preds_.reserve(stationary_sample.size(0));
-    for (uint32_t i = 0; i < stationary_sample.size(0); i++) {
-        set_flat_parameters(net, stationary_sample[i]);
-        bayes_preds_.push_back(net.forward(inputs_val).toTensor().detach());
-    }
-    const auto bayes_preds = torch::stack(bayes_preds_);
-    const auto bayes_mean_pred = bayes_preds.mean(0);
-    const auto bayes_std_pred = bayes_preds.std(0);
+   const auto stationary_sample = result.slice(0, result.size(0) / 10);
 
-    auto loss_fn = torch::nn::MSELoss{};
-    auto optimizer = torch::optim::Adam{params_init, torch::optim::AdamOptions(0.005)};
-    auto adam_preds = Tensors{};
-    adam_preds.reserve(n_epochs);
+   set_flat_parameters(net, stationary_sample.mean(0));
+   const auto posterior_mean_pred = net.forward(inputs_val).toTensor().detach();
 
-    std::cout << " Running Adam gradient descent optimisation ...\n";
-    for (uint32_t i = 0; i < n_epochs; i++) {
+   auto bayes_preds_ = Tensors{};
+   bayes_preds_.reserve(stationary_sample.size(0));
+   for (uint32_t i = 0; i < stationary_sample.size(0); i++) {
+       set_flat_parameters(net, stationary_sample[i]);
+       bayes_preds_.push_back(net.forward(inputs_val).toTensor().detach());
+   }
+   const auto bayes_preds = torch::stack(bayes_preds_);
+   const auto bayes_mean_pred = bayes_preds.mean(0);
+   const auto bayes_std_pred = bayes_preds.std(0);
 
-        optimizer.zero_grad();
-        const auto output = net.forward(inputs_train).toTensor();
-        const auto loss = loss_fn(output, y_train);
-        loss.backward();
-        optimizer.step();
+   auto loss_fn = torch::nn::MSELoss{};
+   auto optimizer = torch::optim::Adam{params_init, torch::optim::AdamOptions(0.005)};
+   auto adam_preds = Tensors{};
+   adam_preds.reserve(n_epochs);
 
-        adam_preds.push_back(net.forward(inputs_val).toTensor().detach());
-    }
+   std::cout << " Running Adam gradient descent optimisation ...\n";
+   for (uint32_t i = 0; i < n_epochs; i++) {
 
-    std::cout << " Initial MSE loss:\n" << loss_fn(adam_preds.front(), y_val) << "\n"
-              << " Optimal MSE loss:\n" << loss_fn(adam_preds.back(), y_val) << "\n"
-              << " Posterior mean MSE loss:\n" << loss_fn(posterior_mean_pred, y_val) << "\n"
-              << " Bayes prediction mean MSE loss:\n" << loss_fn(bayes_mean_pred, y_val) << "\n"
-              << " Bayes prediction +/- std MSE loss:\n"
-              << torch::stack({loss_fn(bayes_mean_pred + bayes_std_pred, y_val),
-                               loss_fn(bayes_mean_pred - bayes_std_pred, y_val)}).view({1,2})
-              << "\n";
-    */
+       optimizer.zero_grad();
+       const auto output = net.forward(inputs_train).toTensor();
+       const auto loss = loss_fn(output, y_train);
+       loss.backward();
+       optimizer.step();
+
+       adam_preds.push_back(net.forward(inputs_val).toTensor().detach());
+   }
+
+   std::cout << " Initial MSE loss:\n" << loss_fn(adam_preds.front(), y_val) << "\n"
+             << " Optimal MSE loss:\n" << loss_fn(adam_preds.back(), y_val) << "\n"
+             << " Posterior mean MSE loss:\n" << loss_fn(posterior_mean_pred, y_val) << "\n"
+             << " Bayes prediction mean MSE loss:\n" << loss_fn(bayes_mean_pred, y_val) << "\n"
+             << " Bayes prediction +/- std MSE loss:\n"
+             << torch::stack({loss_fn(bayes_mean_pred + bayes_std_pred, y_val),
+                              loss_fn(bayes_mean_pred - bayes_std_pred, y_val)}).view({1,2})
+             << "\n";
+   */
+
     return true;
 }

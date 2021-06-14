@@ -68,6 +68,7 @@ torch::Tensor sample_jit_module(
         float jitter,
         float step_size,
         float binding_constant) {
+    /*
     torch::manual_seed(SEED);
     auto module = load_module(jit_model_pt);
     if (!module.has_value())
@@ -106,10 +107,10 @@ torch::Tensor sample_jit_module(
 
     const auto samples = bnet_sampler(params_init, niter);
 
-    const auto result = stack(samples);
+    const auto result = torch::stack(samples);
     torch::save(result, save_sample_pt);
-
-    return result;
+    */
+    return torch::Tensor{};
 }
 
 torch::Tensor compute_posterior_mean_prediction(

@@ -5,6 +5,7 @@
 DEFINE_bool(normal, false, "Test GHMC sampler for Normal Distribution");
 DEFINE_bool(funnel, false, "Test GHMC sampler for Funnel Distribution");
 DEFINE_bool(bnet, false, "Test GHMC sampler for Bayesian Deep Learning");
+DEFINE_string(test_data, ".", "Path to the location of noa-test-data");
 DEFINE_bool(cuda, false, "Run on GPU");
 
 auto main(int argc, char **argv) -> int {
@@ -26,7 +27,7 @@ auto main(int argc, char **argv) -> int {
             return 1;
 
     if (FLAGS_bnet)
-        if (!sample_bayesian_net("ghmc_sample_bayesian_net.pt", device))
+        if (!sample_bayesian_net(FLAGS_test_data, "ghmc_sample_bayesian_net.pt", device))
             return 1;
 
     return 0;

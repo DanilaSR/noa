@@ -201,39 +201,70 @@ namespace noa::utils {
         return torch::abs(computed - expected).mean();
     }
 
-    template<typename Net>
-    inline Tensors parameters(const Net &net) {
+    template<typename NetData>
+    inline Tensors to_tensors(const NetData &net_data) {
         auto res = std::vector<Tensor>{};
-        for (const auto &params : net.parameters())
-            res.push_back(params);
+        for (const auto &val : net_data)
+            res.push_back(val);
         return res;
     }
 
     template<typename Net>
-    inline Tensor flat_parameters(const Net &net) {
+    inline Tensors parameters(const Net &net) {
+        return to_tensors(net.parameters());
+    }
+
+    template<typename Net>
+    inline Tensors buffers(const Net &net) {
+        return to_tensors(net.buffers());
+    }
+
+    template<typename NetData>
+    inline Tensor flat_data(const NetData &net_data, bool detach) {
         auto res = std::vector<Tensor>{};
-        for (const auto &params : net.parameters())
-            res.push_back(params.detach().flatten());
+        for (const auto &val : net_data)
+            res.push_back((detach ? val.detach() : val).flatten());
         return torch::cat(res);
+    }
+
+    template<typename Net>
+    inline Tensor flat_parameters(const Net &net) {
+        return flat_data(net.parameters(), true);
+    }
+
+    template<typename Net>
+    inline Tensor flat_buffers(const Net &net) {
+        return flat_data(net.buffers(), false);
+    }
+
+    template<typename NetData>
+    inline bool set_flat_data(const NetData &net_data, const Tensor &data){
+        if (data.dim() > 1)
+        {
+            std::cerr << "Invalid arguments to noa::utils::set_flat_data : "
+                      << "expecting 1D parameters\n";
+            return false;
+        }
+        int64_t i = 0;
+        for (const auto &val : net_data)
+        {
+            const auto i0 = i;
+            i += val.numel();
+            val.set_data(data.slice(0, i0, i).view_as(val));
+        }
+        return true;
     }
 
     template <typename Net>
     inline bool set_flat_parameters(Net &net, const Tensor &parameters)
     {
-        if (parameters.dim() > 1)
-        {
-            std::cerr << "Invalid arguments to noa::utils::set_flat_parameters : "
-                      << "expecting 1D parameters\n";
-            return false;
-        }
-        int64_t i = 0;
-        for (const auto &param : net.parameters())
-        {
-            const auto i0 = i;
-            i += param.numel();
-            param.set_data(parameters.slice(0, i0, i).view_as(param));
-        }
-        return true;
+        return set_flat_data(net.parameters(), parameters);
+    }
+
+    template <typename Net>
+    inline bool set_flat_buffers(Net &net, const Tensor &buffers)
+    {
+        return set_flat_data(net.buffers(), buffers);
     }
 
     inline ScriptModuleOpt load_module(const Path &jit_module_pt){
