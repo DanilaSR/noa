@@ -114,25 +114,21 @@ inline Status sample_funnel_distribution(const Path &save_result_to,
     return true;
 }
 
-
 inline Status sample_bayesian_net(
         const Path &test_data_location,
         const Path &save_result_to,
         torch::DeviceType device = torch::kCPU) {
-    torch::manual_seed(SEED);
 
+    torch::manual_seed(SEED);
     std::cout << "Bayesian Deep Learning regression example:\n";
 
     auto module = load_module(test_data_location / jit_net_pt);
     if (!module.has_value())
         return false;
 
-    auto dual_module = load_module(test_data_location / jit_dual_net_pt);
-    if (!dual_module.has_value())
-        return false;
-
-    auto &dual_net = dual_module.value();
-
+    auto &net = module.value();
+    net.train();
+    net.to(device);
 
     const auto n_tr = 6;
     const auto n_val = 300;
@@ -144,19 +140,73 @@ inline Status sample_bayesian_net(
     const auto x_train = torch::linspace(-3.14f, 3.14f, n_tr, torch::device(device)).view({-1, 1});
     const auto y_train = torch::sin(x_train) + 0.1f * torch::randn_like(x_train);
 
-    auto &net = module.value();
-    net.train(true);
-    net.to(device);
+    const auto params_init = flat_parameters(net).detach().clone();
+    auto loss_fn = torch::nn::MSELoss{};
 
-    set_flat_buffers(dual_net, x_train.flatten());
+    const auto initial_loss = loss_fn(net({x_val}).toTensor().detach(), y_val);
+    const auto initial_loss_dual = loss_fn(dual_net(params_init, x_val), y_val);
+
+    if (!initial_loss.eq(initial_loss_dual).item<bool>()) {
+        std::cerr << "Inconsistent TorchScript model, initial loss values disagree:\n"
+                  << initial_loss << "\n"
+                  << initial_loss_dual << "\n";
+        return false;
+    }
+
+    auto optimizer = torch::optim::Adam{parameters(net), torch::optim::AdamOptions(0.005)};
+
+    std::cout << " Running Adam gradient descent optimisation ...\n";
+    for (uint32_t i = 0; i < n_epochs; i++) {
+        optimizer.zero_grad();
+        const auto output = net({x_train}).toTensor();
+        const auto loss = loss_fn(output, y_train);
+        loss.backward();
+        optimizer.step();
+    }
+
+    const auto log_prob_net = [&x_train, &y_train](const Parameters &theta_) {
+        const auto theta = theta_.detach().requires_grad_(true);
+        const auto log_prob = -50 * (y_train - dual_net(theta, x_train)).pow(2).sum()
+                              - theta.pow(2).sum() / 2;
+        return LogProbabilityGraph{log_prob, theta};
+    };
+
+    const auto conf_net = Configuration<float>{}
+            .set_max_flow_steps(10)
+            .set_jitter(0.01f)
+            .set_step_size(0.005f)
+            .set_binding_const(10.f)
+            .set_verbosity(true);
+
+    const auto net_sampler = sampler(log_prob_net, conf_net);
+
+    // Run sampler
+    const auto begin = steady_clock::now();
+    const auto samples = net_sampler(params_init, 50);
+    const auto end = steady_clock::now();
+    std::cout << "GHMC: sampler took " << duration_cast<microseconds>(end - begin).count() / 1E+6
+              << " seconds" << std::endl;
+    if (samples.size() <= 1) {
+        std::cerr << "Sampler failed\n";
+        return false;
+    }
+
+    const auto result = torch::stack(samples);
+    save_result(result, save_result_to);
+
+    //const auto result = load_tensor(save_result_to).value();
+
+    const auto stationary_sample = result.slice(0, result.size(0) / 10);
+
+    const auto posterior_mean_pred = dual_net(stationary_sample.mean(0), x_val);
+
+
+    std::cout << " Initial MSE loss:\n" << initial_loss << "\n"
+              << " Optimal MSE loss:\n" << loss_fn(net({x_val}).toTensor().detach(), y_val) << "\n"
+              << " Posterior mean MSE loss:\n" << loss_fn(posterior_mean_pred, y_val) << "\n";
 
     return true;
-
     /*
-
-   const auto params_init = parameters(net);
-   const auto inputs_val = std::vector<torch::jit::IValue>{x_val};
-   const auto inputs_train = std::vector<torch::jit::IValue>{x_train};
 
    const auto log_prob_bnet = [&net, &inputs_train, &y_train](const Parameters &theta) {
        uint32_t i = 0;
@@ -209,22 +259,7 @@ inline Status sample_bayesian_net(
    const auto bayes_mean_pred = bayes_preds.mean(0);
    const auto bayes_std_pred = bayes_preds.std(0);
 
-   auto loss_fn = torch::nn::MSELoss{};
-   auto optimizer = torch::optim::Adam{params_init, torch::optim::AdamOptions(0.005)};
-   auto adam_preds = Tensors{};
-   adam_preds.reserve(n_epochs);
 
-   std::cout << " Running Adam gradient descent optimisation ...\n";
-   for (uint32_t i = 0; i < n_epochs; i++) {
-
-       optimizer.zero_grad();
-       const auto output = net.forward(inputs_train).toTensor();
-       const auto loss = loss_fn(output, y_train);
-       loss.backward();
-       optimizer.step();
-
-       adam_preds.push_back(net.forward(inputs_val).toTensor().detach());
-   }
 
    std::cout << " Initial MSE loss:\n" << loss_fn(adam_preds.front(), y_val) << "\n"
              << " Optimal MSE loss:\n" << loss_fn(adam_preds.back(), y_val) << "\n"
@@ -236,5 +271,4 @@ inline Status sample_bayesian_net(
              << "\n";
    */
 
-    return true;
 }

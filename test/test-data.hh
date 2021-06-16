@@ -6,7 +6,7 @@
 using namespace noa::ghmc;
 using namespace noa::utils;
 
-inline torch::Tensor lazy_load_or_fail(TensorOpt &tensor, const Path &path) {
+inline Tensor lazy_load_or_fail(TensorOpt &tensor, const Path &path) {
     if (tensor.has_value()) {
         return tensor.value();
     } else {
@@ -34,6 +34,15 @@ inline const auto conf_funnel = Configuration<float>{}
         .set_jitter(0.00001)
         .set_verbosity(true);
 
+inline Tensor dual_net(const Parameters &parameters, const Tensor &features) {
+    auto x = features.matmul(parameters.slice(0, 0, 10).view({1, 10})) + parameters.slice(0, 10, 20).view({1, 10});
+    x = torch::relu(x);
+    x = x.matmul(parameters.slice(0, 20, 120).view({10, 10}).t()) + parameters.slice(0, 120, 130).view({1, 10});
+    x = torch::relu(x);
+    x = x.matmul(parameters.slice(0, 130, 140).view({10, 1})) + parameters.slice(0, 140).view({1, 1});
+    return x;
+}
+
 inline const auto noa_test_data = noa::utils::Path{"noa-test-data"};
 
 inline const auto ghmc_dir = noa_test_data / "ghmc";
@@ -45,7 +54,6 @@ inline const auto expected_energy_pt = ghmc_dir / "expected_energy.pt";
 inline const auto expected_flow_theta_pt = ghmc_dir / "expected_flow_theta.pt";
 inline const auto expected_flow_moment_pt = ghmc_dir / "expected_flow_moment.pt";
 inline const auto jit_net_pt = ghmc_dir / "jit_net.pt";
-inline const auto jit_dual_net_pt = ghmc_dir / "jit_dual_net.pt";
 
 inline const auto pms_dir = noa_test_data / "pms";
 inline const auto kinetic_energies_pt = pms_dir / "kinetic_energies.pt";

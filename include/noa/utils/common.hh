@@ -45,6 +45,7 @@ namespace noa::utils {
     using Tensor = torch::Tensor;
     using TensorOpt = std::optional<Tensor>;
     using Tensors = std::vector<Tensor>;
+    using NamedTensors = std::unordered_map<std::string, Tensor>;
     using ScriptModule = torch::jit::Module;
     using ScriptModuleOpt = std::optional<ScriptModule>;
     using OutputLeaf = Tensor;
@@ -209,6 +210,15 @@ namespace noa::utils {
         return res;
     }
 
+
+    template<typename NetNamedData>
+    inline NamedTensors to_named_tensors(const NetNamedData &net_named_data) {
+        auto res = std::unordered_map<std::string, Tensor>{};
+        for (const auto &[name, val] : net_named_data)
+            res[name] = val;
+        return res;
+    }
+
     template<typename Net>
     inline Tensors parameters(const Net &net) {
         return to_tensors(net.parameters());
@@ -217,6 +227,16 @@ namespace noa::utils {
     template<typename Net>
     inline Tensors buffers(const Net &net) {
         return to_tensors(net.buffers());
+    }
+
+    template<typename Net>
+    inline NamedTensors named_parameters(const Net &net) {
+        return to_named_tensors(net.named_parameters());
+    }
+
+    template<typename Net>
+    inline NamedTensors named_buffers(const Net &net) {
+        return to_named_tensors(net.named_buffers());
     }
 
     template<typename NetData>
